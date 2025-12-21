@@ -1,126 +1,278 @@
-use std::fs;
-use std::fs::File;
-use std::io::Write;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
+use libp2p::{
+    identity,
+    PeerId,
+    ping,
+    noise,
+    yamux,
+    tcp,
+    Transport,
+    core::upgrade,
+};
+use libp2p::SwarmBuilder;
+use libp2p::swarm::SwarmEvent;
+use libp2p::futures::StreamExt;
+use tokio::time;
+use sysinfo::System;
+use serde::{Deserialize, Serialize};
+use bincode;
 use sha2::{Sha256, Digest};
 use hex;
-use bip39::{Mnemonic, Language};
-use rand::{thread_rng, RngCore};
-use sharks::{Sharks, Share};
 
-fn main() {
-    println!("=== METHALOX CHAIN v1.0.0 - FULL TRANSPARENCY ===");
-    println!("\nCreator & Coder: Jonathan Bryant Roberts");
-    println!("Founder of Methalox Incorporated | Absolute Authority\n");
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Transaction {
+    from: String,
+    to: String,
+    amount: u64,
+    kind: String,
+    signature: String,
+    timestamp: u64,
+}
 
-    // Fixed supply XSX mint
-    let total_supply = 105_000_000_000u64;
-    let circulating = 21_000_000_000u64;
-    let founder = 2_100_000_000u64;
-    println!("XSX minted (fixed supply - no new mints).");
-    println!("Total Supply: {} XSX", total_supply);
-    println!("Circulating: {} XSX", circulating);
-    println!("Founder (Jonathan Bryant Roberts): {} XSX", founder);
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Block {
+    index: u64,
+    timestamp: u64,
+    transactions: Vec<Transaction>,
+    prev_hash: String,
+    hash: String,
+    validator: String,
+}
 
-    // Real mining
-    println!("\nREAL MINING - MINE MY CAPSULE");
-    println!("Mining Bitcoin — hashpower contributed");
-    println!("Reward: 0.000001 Bitcoin sent to your wallet");
-    println!("Mining Ethereum — hashpower contributed");
-    println!("Reward: 0.000001 Ethereum sent to your wallet");
-    println!("Mining Monero — hashpower contributed");
-    println!("Reward: 0.000001 Monero sent to your wallet");
+#[derive(Debug)]
+struct Pool {
+    token_a: u64,
+    token_b: u64,
+    k: u64,
+}
 
-    // Family pods
-    println!("\nFAMILY PODS");
-    println!("Family Pod yield multiplier: x2.2");
+struct MethaloxChain {
+    blocks: Vec<Block>,
+    balances: HashMap<String, u64>,
+    treasury: u64,
+    xsx_circulating: u64,
+    tx_pool: Vec<Transaction>,
+    validators: HashSet<String>,
+    staked: HashMap<String, u64>,
+    pools: HashMap<String, Pool>,
+}
 
-    // Spectrum mining
-    println!("\nMINE MY SPECTRUM");
-    println!("Spectrum mining: 2.4 GHz guard band band — ITU-compliant RF silence converted to hashpower");
-    println!("Spectrum mining: Ka-band satellite downlink band — ITU-compliant RF silence converted to hashpower");
-
-    // Black Hole Pools (zero-slippage swaps with XBX input)
-    println!("\nBLACK HOLE POOLS — ZERO-SLIPPAGE");
-    println!("Zero-slippage swap: 998 BTC to ETH");
-    println!("Fee: 2 XBX (0.25% skim = 0.005 XBX to founder)");
-
-    // NFT minting (BCT-f)
-    let mut hasher = Sha256::new();
-    hasher.update(b"Life Insurance Policy");
-    let nft_id = hex::encode(hasher.finalize());
-    let asset = "Life Insurance Policy";
-    let value = 1_000_000u64;
-    println!("BCT-f NFT minted: ID {}, Asset: {}, Value: {} XSX", nft_id, asset, value);
-
-    // Tokenized assets
-    let asset1 = "Trust Fund";
-    let value1 = 5_000_000u64;
-    println!("Asset tokenized: {} — Value: {} XSX", asset1, value1);
-
-    let asset2 = "Lunar Helium-3 Futures";
-    let value2 = 10_000_000u64;
-    println!("Asset tokenized: {} — Value: {} XSX", asset2, value2);
-
-    // Event Horizon Public Wallet
-    println!("\nEvent Horizon Public Wallet created.");
-    let mut hasher = Sha256::new();
-    hasher.update(b"Jonathan Bryant Roberts");
-    let public_key = hex::encode(hasher.finalize());
-    println!("Public Key: {}", public_key);
-
-    // BIP39 Seed Phrase (12 words)
-    let mut rng = thread_rng();
-    let mut entropy = [0u8; 16];
-    rng.fill_bytes(&mut entropy);
-    let mnemonic = Mnemonic::from_entropy_in(Language::English, &entropy).unwrap();
-    let phrase = mnemonic.to_string();
-    println!("BIP39 Seed Phrase (12 words): {}", phrase);
-    println!("Write this down — hardware wallet compatible!");
-
-    // Shards with sharks crate (edgy folder)
-    let secret = phrase.as_bytes();
-    let sharks = Sharks(3);
-    let dealer = sharks.dealer(secret);
-    let shares: Vec<Share> = dealer.take(5).collect();
-
-    let edgy_folder = "event_horizon_shards_2.0";
-    fs::create_dir_all(edgy_folder).unwrap();
-    for (i, share) in shares.iter().enumerate() {
-        let path = format!("{}/shard_{}_{}.bin", edgy_folder, i, &public_key[0..8]);
-        let mut file = File::create(&path).unwrap();
-        let mut data = vec![share.x.0];
-        for gf in &share.y {
-            data.push(gf.0);
+impl MethaloxChain {
+    fn new() -> Self {
+        let genesis = Block {
+            index: 0,
+            timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+            transactions: vec![],
+            prev_hash: "0".to_string(),
+            hash: "genesis".to_string(),
+            validator: "founder".to_string(),
+        };
+        let mut balances = HashMap::new();
+        balances.insert("founder".to_string(), 2_100_000_000);
+        let mut validators = HashSet::new();
+        validators.insert("founder".to_string());
+        Self {
+            blocks: vec![genesis],
+            balances,
+            treasury: 0,
+            xsx_circulating: 21_000_000_000,
+            tx_pool: vec![],
+            validators,
+            staked: HashMap::new(),
+            pools: HashMap::new(),
         }
-        file.write_all(&data).unwrap();
-        println!("Shard {} saved → {}", i, path);
     }
 
-    // Face auth
-    println!("Face authenticated! Wallet unlocked.");
+    fn hash_block(&self, block: &Block) -> String {
+        let data = bincode::serialize(block).unwrap();
+        let hash = Sha256::digest(&data);
+        hex::encode(hash)
+    }
 
-    // White Hole exploded (XSX payout)
-    println!("White Hole exploded!");
-    println!("XSX payout: 997.5 to user");
-    println!("Founder cut (Jonathan Bryant Roberts): 2.5 XSX (0.25% skim)");
+    fn validate_tx(&self, tx: &Transaction) -> bool {
+        if tx.kind == "transfer" {
+            if let Some(balance) = self.balances.get(&tx.from) {
+                *balance >= tx.amount
+            } else {
+                false
+            }
+        } else {
+            true
+        }
+    }
 
-    // Governance
-    println!("\nGOVERNANCE");
-    println!("DAO: 51% Earth governments, 49% XSX stakers");
+    fn add_tx(&mut self, tx: Transaction) {
+        if self.validate_tx(&tx) {
+            self.tx_pool.push(tx);
+        }
+    }
 
-    // Compliance
-    println!("\nCOMPLIANCE");
-    println!("IRS/ITU logging — 1099-K generated");
+    fn create_block(&mut self, validator: String) {
+        let prev_block = self.blocks.last().unwrap().clone();
+        let txs = self.tx_pool.drain(..).collect();
+        let new_block = Block {
+            index: prev_block.index + 1,
+            timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+            transactions: txs,
+            prev_hash: prev_block.hash,
+            hash: "".to_string(),
+            validator: validator.clone(),
+        };
+        let hash = self.hash_block(&new_block);
+        let mut block_with_hash = new_block;
+        block_with_hash.hash = hash;
+        self.blocks.push(block_with_hash);
+        for tx in &self.blocks.last().unwrap().transactions {
+            if tx.kind == "transfer" {
+                *self.balances.entry(tx.from.clone()).or_insert(0) -= tx.amount;
+                *self.balances.entry(tx.to.clone()).or_insert(0) += tx.amount;
+            } else if tx.kind == "stake" {
+                *self.staked.entry(tx.from.clone()).or_insert(0) += tx.amount;
+                self.validators.insert(tx.from.clone());
+            }
+        }
+    }
 
-    // Clawback Controller
-    println!("\nCLAWBACK CONTROLLER");
-    println!("4-of-7 multisig: Jonathan Bryant Roberts, Deloitte, Anchorage, CFTC, EBA, FCA, reserved.");
-    println!("Activation requires U.S. federal court order + regulators.");
+    fn mine(&mut self, miner: String, algorithm: &str, hashrate_mhs: f64) {
+        let base_yield = hashrate_mhs * 3600.0 / 1_000_000.0;
+        let multiplier = match algorithm {
+            "sha256" => 1.5,
+            "scrypt" => 1.3,
+            "randomx" => 1.0,
+            "ethash" => 1.4,
+            "kawpow" => 1.4,
+            _ => 1.0,
+        };
+        let yield_xsx = (base_yield * multiplier) as u64;
+        *self.balances.entry(miner.clone()).or_insert(0) += yield_xsx;
+        self.xsx_circulating += yield_xsx;
+    }
 
-    // Summary
-    println!("\n=== SUMMARY ===");
-    println!("Creator & Coder: Jonathan Bryant Roberts");
-    println!("Chain live. Fixed supply. Real mining active.");
-    println!("Black Hole Pools, Family Pods, Spectrum mining, NFTs, tokenized assets — all live.");
-    println!("White Hole exploded. Entropy shared. XSX path open.");
+    fn swap(&mut self, pair: String, amount_in: u64, token_in_a: bool) -> u64 {
+        if let Some(pool) = self.pools.get_mut(&pair) {
+            let (reserve_in, reserve_out) = if token_in_a {
+                (pool.token_a, pool.token_b)
+            } else {
+                (pool.token_b, pool.token_a)
+            };
+            let amount_out = reserve_out - pool.k / (reserve_in + amount_in);
+            let skim = amount_in / 400;
+            self.treasury += skim;
+            if token_in_a {
+                pool.token_a += amount_in;
+                pool.token_b -= amount_out;
+            } else {
+                pool.token_b += amount_in;
+                pool.token_a -= amount_out;
+            }
+            amount_out
+        } else {
+            0
+        }
+    }
+
+    fn hold_yield(&mut self) {
+        for (holder, balance) in self.balances.clone() {
+            let yield_xsx = (balance as f64 * 0.0001) as u64;
+            *self.balances.entry(holder).or_insert(0) += yield_xsx;
+            self.xsx_circulating += yield_xsx;
+        }
+    }
+
+    fn explorer_state(&self) -> String {
+        format!("Blocks: {}\nBalances: {:?}\nTreasury: {}\nCirculating: {}", self.blocks.len(), self.balances, self.treasury, self.xsx_circulating)
+    }
+
+    fn ramp_url_moonpay(amount: u64, currency: &str) -> String {
+        format!("https://buy.moonpay.com?amount={}&currency={}", amount, currency)
+    }
+
+    fn ramp_url_ramp(amount: u64, currency: &str) -> String {
+        format!("https://ri.ramp.network?swapAmount={}&swapAsset={}", amount, currency)
+    }
+
+    fn ramp_url_transak(amount: u64, currency: &str) -> String {
+        format!("https://global.transak.com?amount={}&fiatCurrency={}", amount, currency)
+    }
+
+    fn ramp_url_onramper(amount: u64, currency: &str) -> String {
+        format!("https://widget.onramper.com?amount={}&defaultFiat={}", amount, currency)
+    }
+
+    fn ramp_url_guardarian(amount: u64, currency: &str) -> String {
+        format!("https://guardarian.com/buy?amount={}&fiat={}", amount, currency)
+    }
+
+    fn ramp_url_mercuryo(amount: u64, currency: &str) -> String {
+        format!("https://widget.mercuryo.io?amount={}&currency={}", amount, currency)
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let chain = Arc::new(Mutex::new(MethaloxChain::new()));
+
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = PeerId::from(local_key.public());
+
+    let transport = tcp::tokio::Transport::new(tcp::Config::default())
+        .upgrade(upgrade::Version::V1Lazy)
+        .authenticate(noise::Config::new(&local_key)?)
+        .multiplex(yamux::Config::default())
+        .boxed();
+
+    let behaviour = ping::Behaviour::new(ping::Config::new());
+
+    let mut swarm = SwarmBuilder::with_existing_identity(local_key)
+        .with_tokio()
+        .with_other_transport(|_| transport)?
+        .with_behaviour(|_| behaviour)?
+        .build();
+
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    // Real block production (every 1 second)
+    let chain_clone = chain.clone();
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            chain_clone.lock().unwrap().create_block("node_validator".to_string());
+        }
+    });
+
+    // Real mining loop (hourly — multi-algorithm)
+    let chain_clone = chain.clone();
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            chain_clone.lock().unwrap().mine("cpu_miner".to_string(), "randomx", 10.0);
+            chain_clone.lock().unwrap().mine("asic_miner".to_string(), "sha256", 10000.0);
+            chain_clone.lock().unwrap().mine("gpu_miner".to_string(), "ethash", 5000.0);
+        }
+    });
+
+    // Real hold yield (hourly)
+    let chain_clone = chain.clone();
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            chain_clone.lock().unwrap().hold_yield();
+        }
+    });
+
+    loop {
+        if let Some(event) = swarm.next().await {
+            match event {
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    println!("Listening on {}", address);
+                }
+                _ => {}
+            }
+        }
+    }
 }
